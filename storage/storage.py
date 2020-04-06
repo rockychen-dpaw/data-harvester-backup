@@ -6,7 +6,7 @@ from utils import JSONEncoder,JSONDecoder
 
 class ResourceStorage(object):
     """
-    A interface to list/upload/get a resource from storage container
+    A interface to list/upload/get a resource 
     """
 
     @property
@@ -45,69 +45,49 @@ class ResourceStorage(object):
         """
         raise NotImplementedError("Property 'resourcemetadata' is not implemented.")
 
-    def get_resource(self,resourceid=None):
+    def download(self,resourceid=None,filename=None,overwrite=False,resource_group=None):
         """
-        Return (resourceid,resource)
+        Download the resource with resourceid, and return (resource metadata,local resource's filename)
+        overwrite: remove the existing file or folder if overwrite is True
         if resourceid is None, return (the current resourceid, the current resource)
-        Return (resourceid,None) if resource with resourceid is not found
-        Return (None,None) if can't find the current resourceid
+        raise exception if failed or can't find the resource
         """
         raise NotImplementedError("Method 'get_resource' is not implemented.")
 
     def get_json(self,resourceid=None):
         """
-        Return (resourceid,resource as dict object)
-        if resourceid is None, return (the current resourceid, the current resource dict object)
-        Return (resourceid,None) if resource with resourceid is not found
-        Return (None,None) if can't find the current resourceid
+        Return (resource_metadata,resource as dict object)
+        raise exception if failed or can't find the resource
         """
-        resourceid,data = self.get_resource(resourceid)
-        if data is None:
-            return (resourceid,None)
-        else:
-            return (resourceid,json.loads(data.decode(),cls=JSONDecoder))
+        metadata,filename = self.download_resource(resourceid)
+        try:
+            with open(filename,'r') as f:
+                return (metadata,json.loads(f.read(),cls=JSONDecoder))
+        finally:
+            os.remove(filename)
 
-    def download(self,resourceid,filename=None):
-        """
-        Download the resource 
-        Return (resourceid,the filename)
-        Return (resourceid,None) if resource with resourceid is not found
-        Return (None,None) if can;t find the resourceid
-        """
-        resourceid,data = self.get_resource(resourceid)
-        if data is None:
-            return (resourceid,None)
-        else:
-            if not filename:
-                filename = os.path.join(tempfile.gettempdir(),resourceid)
-            filedir = os.path.split(filename)[0]
-            if filedir and not os.path.exists(filedir):
-                os.makedirs(filedir)
-
-            with open(filename,'wb') as f:
-                f.write(data)
-
-            return (resourceid,filename)
-
-    def push_resource(self,resource,metadata=None):
+    def push_resource(self,resource,metadata=None,f_post_push=None):
         """
         Push the resource to the storage
+        f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
         Return the new resourcemetadata.
         """
         raise NotImplementedError("Method 'push_resource' is not implemented.")
 
         
-    def push_json(self,obj,metadata=None):
+    def push_json(self,obj,metadata=None,f_post_push=None):
         """
         Push the resource to the storage
+        f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
         Return the new resourcemetadata.
         """
-        return self.push_resource(json.dumps(obj,cls=JSONEncoder).encode(),metadata=metadata)
+        return self.push_resource(json.dumps(obj,cls=JSONEncoder).encode(),metadata=metadata,f_post_push=f_post_push)
 
-    def push_file(self,filename,metdata=None):
+    def push_file(self,filename,metadata=None,f_post_push=None):
         """
         Push the resource from file to the storage
+        f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
         Return the new resourcemetadata.
         """
         with open(filename,'rb') as f:
-            return self.push_resource(f,metadata=metadata)
+            return self.push_resource(f,metadata=metadata,f_post_push=f_post_push)
