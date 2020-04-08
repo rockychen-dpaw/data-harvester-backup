@@ -2,6 +2,8 @@ from datetime import datetime
 import hashlib
 import pytz
 import json
+import sys
+import imp
 import re
 import os
 import subprocess
@@ -61,6 +63,32 @@ def parse_db_connection_string(connection_string):
 
     return database_config
 
+
+def load_module(name,base_path="."):
+    # Fast path: see if the module has already been imported.
+    try:
+        return sys.modules[name]
+    except KeyError:
+        pass
+    
+    path,filename = os.path.split(name.replace(".","/"))
+    if not path.startswith("/"):
+        base_path = os.path.realpath(base_path)
+        path = os.path.join(base_path,path)
+
+    # If any of the following calls raises an exception,
+    # there's a problem we can't handle -- let the caller handle it.
+
+    fp, pathname, description = imp.find_module(filename,[path])
+
+    try:
+        return imp.load_module(name, fp, pathname, description)
+    finally:
+        # Since we may exit via an exception, close fp explicitly.
+        if fp:
+            fp.close()
+
+
 def file_md5(f):
     cmd = "md5sum {}".format(f)
     output = subprocess.check_output(cmd,shell=True)
@@ -83,3 +111,6 @@ def remove_folder(f):
         shutil.rmtree(f)
     finally:
         pass
+
+def file_size(f):
+    return os.stat(f).st_size

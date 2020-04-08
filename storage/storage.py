@@ -2,7 +2,7 @@ import json
 import tempfile
 import os
 
-from utils import JSONEncoder,JSONDecoder
+from utils import JSONEncoder,JSONDecoder,file_size
 
 class ResourceStorage(object):
     """
@@ -66,7 +66,7 @@ class ResourceStorage(object):
         finally:
             os.remove(filename)
 
-    def push_resource(self,resource,metadata=None,f_post_push=None):
+    def push_resource(self,data,metadata=None,f_post_push=None,length=None):
         """
         Push the resource to the storage
         f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
@@ -89,5 +89,6 @@ class ResourceStorage(object):
         f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
         Return the new resourcemetadata.
         """
+        file_length = file_size(filename)
         with open(filename,'rb') as f:
-            return self.push_resource(f,metadata=metadata,f_post_push=f_post_push)
+            return self.push_resource(f,metadata=metadata,f_post_push=f_post_push,length=file_length)

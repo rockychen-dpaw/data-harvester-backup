@@ -14,7 +14,7 @@ LOG_CONFIG = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
-        'console': {'format': '%(asctime)s %(name)-12s %(message)s'},
+        'console': {'format':  '%(asctime)s %(levelname)-8s %(name)-15s %(message)s'},
     },
     'handlers': {
         'console': {
@@ -27,15 +27,23 @@ LOG_CONFIG = {
         'resource_tracking': {
             'handlers': ['console'],
             'level': 'DEBUG' if DEBUG else 'WARNING',
+            'propagate':False
         },
         'storage': {
             'handlers': ['console'],
             'level': 'DEBUG' if DEBUG else 'WARNING',
+            'propagate':False
         },
         'db': {
             'handlers': ['console'],
             'level': 'DEBUG' if DEBUG else 'WARNING',
+            'propagate':False
         }
+    },
+    'root':{
+        'handlers': ['console'],
+        'level': 'WARNING',
+        'propagate':False
     }
 }
 logging.config.dictConfig(LOG_CONFIG)

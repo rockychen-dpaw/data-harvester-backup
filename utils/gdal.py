@@ -1,4 +1,5 @@
 import re
+import os
 import subprocess
 
 def detect_epsg(filename):
@@ -32,8 +33,9 @@ def get_layers(datasource,layer=None):
     # needs gdal 1.10+
     infoIter = None
 
+    folder,filename = os.path.split(datasource)
     #import ipdb;ipdb.set_trace()
-    cmd = ["ogrinfo", "-al","-so","-ro",datasource]
+    cmd = "cd {0} && ogrinfo -al -so -ro {1}".format(folder,filename)
 
     if layer:
         cmd.append(layer)
@@ -69,7 +71,7 @@ def get_layers(datasource,layer=None):
                 info["fields"].append([lkey,m.group('type'),m.group('width'),m.group('precision')])
 
         return info
-    info = subprocess.check_output(cmd).decode()
+    info = subprocess.check_output(cmd,shell=True).decode()
     layers = []
     previousMatch = None
     layerIter = layer_re.finditer(info)

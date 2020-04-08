@@ -1,8 +1,10 @@
 import json
 import tempfile
 import logging
+import os
+import shutil
 
-from azure.storage.blob import  BlobServiceClient,BlobClient
+from azure.storage.blob import  BlobServiceClient,BlobClient,BlobType
 from azure.core.exceptions import (ResourceNotFoundError,)
 
 from .storage import ResourceStorage
@@ -11,12 +13,12 @@ from utils import JSONEncoder,JSONDecoder,timezone
 
 logger = logging.getLogger(__name__)
 
-class AzureBlobUpdate(object):
+class AzureBlob(object):
     """
     A blob client to get/update a blob resource
     """
     def __init__(self,blob_path,connection_string,container_name):
-        self._blob_client = BlobClient.from_connection_string(connection_string,container_name,blob_path)
+        self._blob_client = BlobClient.from_connection_string(connection_string,container_name,blob_path,**settings.AZURE_BLOG_CLIENT_KWARGS)
 
     def download(self,filename=None,overwrite=False):
         """
@@ -35,7 +37,7 @@ class AzureBlobUpdate(object):
                 filename = f.name
 
         with open(filename,'wb') as f:
-            blob_data = self._container_client.get_blob_client(metadata["resource_path"]).download_to_stream(f)
+            blob_data = self.get_blob_client(metadata["resource_path"]).download_blob().readinto(f)
 
         return filename
         
@@ -51,10 +53,11 @@ class AzureBlobUpdate(object):
             if not isinstance(blob_data,bytes):
                 #blob_data is not byte array, convert it to json string
                 raise Exception("Updated data must be bytes type.")
-            self._blob_client.stage_block("main",blob_data)
-            self._blob_client.commit_block_list(["main"])
+            #self._blob_client.stage_block("main",blob_data)
+            #self._blob_client.commit_block_list(["main"])
+            self._blob_client.upload_blob(blob_data,overwrite=True,timeout=3600)
 
-class AzureJsonBlob(AzureBlobUpdate):
+class AzureJsonBlob(AzureBlob):
     """
     A blob client to get/update a json blob resource
     """
@@ -207,7 +210,7 @@ class AzureBlobResourceClient(AzureBlobResourceMetadata):
         return True
 
 
-class AzureResourceBase(object):
+class AzureBlobResourceBase(object):
     """
     A base client to manage a Azure Resourcet
     """
@@ -220,14 +223,16 @@ class AzureResourceBase(object):
             self._resource_data_path = "{}/data".format(self._resource_base_path)
         else:
             self._resource_data_path = "data"
-
-        self._blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-        self._container_client = self._blob_service_client.get_container_client(container_name)
+        self._connection_string = connection_string
+        self._container_name = container_name
         self._metadata_client = AzureBlobResourceMetadata(connection_string,container_name,resource_base_path=self._resource_base_path,cache=True)
         self._archive = archive
         self.group_resource = group_resource
         if not f_resourceid:
             self._f_resourceid = staticmethod(f_resourceid)
+
+    def get_blob_client(self,blob_name):
+        return BlobClient.from_connection_string(self._connection_string,self._container_name,blob_name,**settings.AZURE_BLOG_CLIENT_KWARGS)
 
     @property
     def resourcename(self):
@@ -241,7 +246,7 @@ class AzureResourceBase(object):
         """
         return self._metadata_client.json
 
-    def download_group(self,resource_group,folder=None,overwirte=False):
+    def download_group(self,resource_group,folder=None,overwrite=False):
         """
         Only available for group resource
         """
@@ -280,7 +285,7 @@ class AzureResourceBase(object):
                 continue
             if metadata.get("resource_id") and metadata.get("resource_path"):
                 with open(os.path.join(folder,metadata["resource_id"]),'wb') as f:
-                    self._container_client.get_blob_client(metadata["resource_path"]).download_to_stream(f)
+                    self.get_blob_client(metadata["resource_path"]).download_blob().readinto(f)
 
         return (groupmetadata,folder)
 
@@ -298,7 +303,6 @@ class AzureResourceBase(object):
                     #already exist and can't overwrite
                     raise Exception("The path({}) already exists".format(filename))
         
-
         resourcemetadata = self.resourcemetadata
         if not resourcemetadata:
             raise ResourceNotFoundError("{} Not Found".format(self.resourcename))
@@ -330,12 +334,12 @@ class AzureResourceBase(object):
                 filename = f.name
 
         with open(filename,'wb') as f:
-            self._container_client.get_blob_client(metadata["resource_path"]).download_to_stream(f)
+            self.get_blob_client(metadata["resource_path"]).download_blob().readinto(f)
 
         return (metadata,filename)
 
 
-class AzureBlobResource(AzureResourceBase,ResourceStorage):
+class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
     """
     A client to upload/download azure resource
     the resource can be a single AzureBlobResource or a group of AzureBlobResource
@@ -350,7 +354,7 @@ class AzureBlobResource(AzureResourceBase,ResourceStorage):
 
     """
 
-    def push_resource(self,data,metadata=None,f_post_push=None):
+    def push_resource(self,data,metadata=None,f_post_push=None,length=None):
         """
         Push the resource to the storage
         f_post_push: a function to call after pushing resource to blob container but before pushing the metadata, has one parameter "metadata"
@@ -412,12 +416,8 @@ class AzureBlobResource(AzureResourceBase,ResourceStorage):
                 currentmetadata["histories"].insert(0,currentmetadata["current"])
 
         #push the resource to azure storage
-        blob_client = self._container_client.get_blob_client(resourceid)
-        if resource_existed:
-            #resource already exist, remove it first
-            blob_client.delete_blob(delete_snapshots=True)
-        import ipdb;ipdb.set_trace()
-        blob_client.upload_blob(data)
+        blob_client = self.get_blob_client(resourcepath)
+        blob_client.upload_blob(data,blob_type=BlobType.BlockBlob,overwrite=True,timeout=3600,max_concurrency=5,length=length)
         #update the resource metadata
         if f_post_push:
             f_post_push(metadata)
@@ -425,7 +425,7 @@ class AzureBlobResource(AzureResourceBase,ResourceStorage):
         if self._archive:
             currentmetadata["current"] = metadata
         else:
-            curentmetadata.update(metadata)
+            currentmetadata.update(metadata)
 
         self._metadata_client.update(resourcemetadata)
 
