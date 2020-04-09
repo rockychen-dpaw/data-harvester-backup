@@ -45,6 +45,30 @@ class ResourceStorage(object):
         """
         raise NotImplementedError("Property 'resourcemetadata' is not implemented.")
 
+    def get_metadata(self,resourceid=None,resource_group=None,resource_file="current",throw_exception=False):
+        """
+        if resource_file is 'current', it means the latest archive of the specific resource
+        Return 
+            if resourceid is none and (resource_group is none or resource is not a group resource), return all resource metadata
+            if resourceid is none and resource_group is not none annd resource is a group resource, return group metadata
+            if resource_file is not none, and resource is archive resource, return the specific resource archivement's metadata, if exists, otherwise return None or throw exception
+            if archived is none or resource is non archive resource, return the specific resource's metadata, if exists, otherwise return None or throw exception
+        """
+        raise NotImplementedError("Method 'resource_exist' is not implemented.")
+
+    def is_exist(self,resourceid,resource_group=None):
+        """
+        Check whether resource exists or not
+        """
+        return True if self.get_metadata(resourceid=resourceid,resource_group=resource_group) else False
+
+    def delete_resource(self,resourceid=None,resource_group=None):
+        """
+        delete the resource_group or specified resource 
+        return the meta data of the deleted resource
+        """
+        raise NotImplementedError("Method 'delete_resource' is not implemented.")
+
     def download(self,resourceid=None,filename=None,overwrite=False,resource_group=None):
         """
         Download the resource with resourceid, and return (resource metadata,local resource's filename)

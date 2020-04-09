@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime,date
 import hashlib
 import pytz
 import json
@@ -25,6 +25,11 @@ class JSONEncoder(json.JSONEncoder):
                 "_type":"datetime",
                 "value":obj.astimezone(tz=TZ).strftime("%Y-%m-%d %H:%M:%S.%f")
             }
+        elif isinstance(obj,date):
+            return {
+                "_type":"date",
+                "value":obj.strftime("%Y-%m-%d")
+            }
         return json.JSONEncoder.default(self,obj)
 
 class JSONDecoder(json.JSONDecoder):
@@ -37,9 +42,11 @@ class JSONDecoder(json.JSONDecoder):
     def object_hook(self, obj):
         if '_type' not in obj:
             return obj
-        type = obj['_type']
-        if type == 'datetime':
-            return datetime.strptime(obj["value"],"%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=TZ)
+        t = obj['_type']
+        if t == 'datetime':
+            return timezone.nativetime(datetime.strptime(obj["value"],"%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=TZ))
+        elif t == 'date':
+            return datetime.strptime(obj["value"],"%Y-%m-%d").date()
         else:
             return obj
 

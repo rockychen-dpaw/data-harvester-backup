@@ -1,15 +1,15 @@
-from datetime import datetime,date
 import os
 import traceback
 import logging
 import tempfile
-from datetime import datetime,timedelta
+from datetime import date,timedelta
 
 
 from utils import timezone,gdal
 import utils
 
 from storage.azure_blob import AzureBlobResource,AzureBlobResourceMetadata
+from storage.exception import ResourceAlreadyExist
 
 from . import settings
 
@@ -55,10 +55,10 @@ def get_blob_resource():
         )
     return _blob_resource
 
-def continuous_archive(delete_after_archive=False,check=False,max_archive_days=None):
+def continuous_archive(delete_after_archive=False,check=False,max_archive_days=None,overwrite=False):
     db = settings.DATABASE
-    earliest_date = db.get(earliest_archive_date)
-    now = datetime.now()
+    earliest_date = db.get(earliest_archive_date)[0].date()
+    now = timezone.now()
     today = now.date()
     if settings.END_WORKING_HOUR is not None and now.hour <= settings.END_WORKING_HOUR:
         if settings.START_WORKING_HOUR is None or now.hour >= settings.START_WORKING_HOUR:
@@ -77,12 +77,12 @@ def continuous_archive(delete_after_archive=False,check=False,max_archive_days=N
     archived_days = 0
     max_archive_days = max_archive_days if max_archive_days > 0 else None
     while archive_date < last_archive_date and (not max_archive_days or archived_days < max_archive_days):
-        archive_by_date(archive_date,delete_after_archive=delete_after_archive,check=check)
+        archive_by_date(archive_date,delete_after_archive=delete_after_archive,check=check,overwrite=overwrite)
         archive_date += timedelta(days=1)
         archived_days += 1
 
-def archive_by_month(year,month,delete_after_archive=False,check=False):
-    now = datetime.now()
+def archive_by_month(year,month,delete_after_archive=False,check=False,overwrite=False):
+    now = timezone.now()
     today = now.date()
     archive_date = date(year,month,1)
     last_archive_date = date(archive_date.year if archive_date.month < 12 else (archive_date.year + 1), (archive_date.month + 1) if archive_date.month < 12 else 1,1)
@@ -96,14 +96,14 @@ def archive_by_month(year,month,delete_after_archive=False,check=False):
     ))
 
     while archive_date < last_archive_date:
-        archive_by_date(archive_date,delete_after_archive=delete_after_archive,check=check)
+        archive_by_date(archive_date,delete_after_archive=delete_after_archive,check=check,overwrite=overwrite)
         archive_date += timedelta(days=1)
 
-def archive_by_date(d,delete_after_archive=False,check=False):
+def archive_by_date(d,delete_after_archive=False,check=False,overwrite=False):
     """
     Archive the logged point within the specified date
     """
-    now = datetime.now()
+    now = timezone.now()
     today = now.date()
     if d >= today:
         raise Exception("Can only archive the logged points happened before today")
@@ -111,7 +111,7 @@ def archive_by_date(d,delete_after_archive=False,check=False):
     archive_id= get_archive_id(d)
     start_date = timezone.datetime(d.year,d.month,d.day)
     end_date = start_date + timedelta(days=1)
-    return archive(archive_group,archive_id,start_date,end_date,delete_after_archive=delete_after_archive,check=check)
+    return archive(archive_group,archive_id,start_date,end_date,delete_after_archive=delete_after_archive,check=check,overwrite=overwrite)
 
 
 def _set_end_datetime(key):
@@ -119,21 +119,38 @@ def _set_end_datetime(key):
         metadata[key] = timezone.now()
     return _func
 
-def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=False,check=False):
+def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=False,check=False,overwrite=False):
     """
     Archive the resouce tracking history by start_date(inclusive), end_date(exclusive)
+    archive_id: a unique identity of the archive file. that means different start_date and end_date should have a different archive_id
+    overwrite: False: raise exception if archive_id already exists; True: overwrite the existing archive file
     """
     db = settings.DATABASE
-    resource_id = "{}.gpkg".format(archive_id)
-    metadata = {"start_archive":timezone.now(),"resource_id":resource_id,"resource_group":archive_group}
+    archive_filename = "{}.gpkg".format(archive_id)
+    metadata = {
+        "start_archive":timezone.now(),
+        "resource_id":archive_id,
+        "resource_file":archive_filename,
+        "resource_group":archive_group,
+        "start_archive_date":start_date,
+        "end_archive_date":end_date
+    }
 
     filename = None
     vrt_filename = None
     work_folder = tempfile.mkdtemp(prefix="archive_loggedpoint")
     def set_end_archive(metadata):
         metadata["end_archive"] = timezone.now()
+    resourcemetadata = None
     try:
         logger.debug("Begin to archive loggedpoint, archive_group={},archive_id={},start_date={},end_date={}".format(archive_group,archive_id,start_date,end_date))
+        blob_resource = get_blob_resource()
+        if not overwrite:
+            #check whether achive exist or not
+            resourcemetadata = blob_resource.resourcemetadata
+            if blob_resource.is_exist(archive_id,resource_group=archive_group):
+                raise ResourceAlreadyExist("The loggedpoint has already been archived. archive_id={0},start_archive_date={1},end_archive_date={2}".format(archive_id,start_date,end_date))
+
         sql = archive_sql.format(start_date.strftime(datetime_pattern),end_date.strftime(datetime_pattern))
         export_result = db.export_spatial_data(sql,filename=os.path.join(work_folder,"loggedpoint.gpkg"),layer=archive_id)
         if not export_result:
@@ -144,7 +161,6 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
         metadata["file_md5"] = utils.file_md5(filename)
         metadata["layer"] = layer_metadata["layer"]
         metadata["features"] = layer_metadata["features"]
-        blob_resource = get_blob_resource()
         #upload archive file
         logger.debug("Begin to push loggedpoint archive file to blob storage, archive_group={},archive_id={},start_date={},end_date={}".format(archive_group,archive_id,start_date,end_date))
         resourcemetadata = blob_resource.push_file(filename,metadata=metadata,f_post_push=_set_end_datetime("end_archive"))
@@ -153,7 +169,7 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
             logger.debug("Begin to check whether loggedpoint archive file was pushed to blob storage successfully, archive_group={},archive_id={},start_date={},end_date={}".format(
                 archive_group,archive_id,start_date,end_date
             ))
-            d_metadata,d_filename = blob_resource.download(resource_id,resource_group=archive_group,filename=os.path.join(work_folder,"loggedpoint_download.gpkg"))
+            d_metadata,d_filename = blob_resource.download(archive_id,resource_group=archive_group,filename=os.path.join(work_folder,"loggedpoint_download.gpkg"))
             d_file_md5 = utils.file_md5(d_filename)
             if metadata["file_md5"] != d_file_md5:
                 raise Exception("Upload loggedpoint archive file failed.source file's md5={}, uploaded file's md5={}".format(metadata["file_md5"],d_file_md5))
@@ -167,18 +183,23 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
         logger.debug("Begin to update vrt file to union all spatial files in the same group, archive_group={},archive_id={},start_date={},end_date={}".format(
             archive_group,archive_id,start_date,end_date
         ))
+        groupmetadata = resourcemetadata[archive_group]
         vrt_id = "{}.vrt".format(archive_group)
         try:
-            d_vrt_metadata = next(m for m in resourcemetadata[archive_group] if m["resource_id"] == vrt_id)
-        except:
-            d_vrt_metadata = None
+            vrt_metadata = next(m for m in groupmetadata.values() if m["resource_id"] == vrt_id)
+        except StopIteration as ex:
+            vrt_metadata = {"resource_id":vrt_id,"resource_file":vrt_id,"resource_group":archive_group}
 
-        vrt_metadata = {"resource_id":vrt_id,"resource_group":archive_group}
-        vrt_metadata["features"] = metadata["features"] + (d_vrt_metadata["features"] if d_vrt_metadata else 0)
+        vrt_metadata["features"] = 0
+        for m in groupmetadata.values():
+            if m["resource_id"] == vrt_id:
+                continue
+            vrt_metadata["features"] += m["features"]
 
-        groupmetadata = resourcemetadata[archive_group]
-        individual_layers = os.linesep.join(individual_layer.format(os.path.splitext(m["resource_id"])[0],m["resource_id"]) for m in groupmetadata if m["resource_id"] != "{}.vrt".format(archive_group))
-        vrt_data = vrt.format(archive_group,individual_layers)
+        layers =  [(m["resource_id"],m["resource_file"]) for m in groupmetadata.values() if m["resource_id"] != vrt_id]
+        layers.sort(key=lambda o:o[0])
+        layers = os.linesep.join(individual_layer.format(m[0],m[1]) for m in layers )
+        vrt_data = vrt.format(archive_group,layers)
         vrt_filename = os.path.join(work_folder,"loggedpoint.vrt")
         with open(vrt_filename,"w") as f:
             f.write(vrt_data)
@@ -191,7 +212,7 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
             logger.debug("Begin to check whether the group vrt file was pused to blob storage successfully, archive_group={},archive_id={},start_date={},end_date={}".format(
                 archive_group,archive_id,start_date,end_date
             ))
-            d_vrt_metadata,d_vrt_filename = blob_resource.download(vrt_metadata["resource_id"],resource_group=archive_group,filename=os.path.join(work_folder,"loggedpoint_download.vrt"))
+            d_vrt_metadata,d_vrt_filename = blob_resource.download(vrt_id,resource_group=archive_group,filename=os.path.join(work_folder,"loggedpoint_download.vrt"))
             d_vrt_file_md5 = utils.file_md5(d_vrt_filename)
             if vrt_metadata["file_md5"] != d_vrt_file_md5:
                 raise Exception("Upload vrt file failed.source file's md5={}, uploaded file's md5={}".format(vrt_metadata["file_md5"],d_vrt_file_md5))
@@ -211,7 +232,7 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
 
 
     finally:
-        #utils.remove_folder(work_folder)
+        utils.remove_folder(work_folder)
         pass
             
 def restore_by_month(year,month,restore_to_origin_table=False,preserve_id=True):
@@ -232,12 +253,12 @@ def restore_by_month(year,month,restore_to_origin_table=False,preserve_id=True):
 def restore_by_date(d,restore_to_origin_table=False,preserve_id=True):
     archive_group = get_archive_group(d)
     archive_id= get_archive_id(d)
-    resource_id = "{}.gpkg".format(archive_id)
+    archive_filename = "{}.gpkg".format(archive_id)
     logger.debug("Begin to import archived loggedpoint, archive_group={},archive_id={}".format(archive_group,archive_id))
     blob_resource = get_blob_resource()
     work_folder = tempfile.mkdtemp(prefix="restore_loggedpoint")
     try:
-        metadata,filename = blob_resource.download(resource_id,resource_group=archive_group,filename=os.path.join(work_folder,resource_id))
+        metadata,filename = blob_resource.download(archive_id,resource_group=archive_group,filename=os.path.join(work_folder,archive_filename))
         imported_table =_restore_data(filename,restore_to_origin_table=restore_to_origin_table,preserve_id=preserve_id)
         logger.debug("End to import archived loggedpoint, archive_group={},archive_id={},imported_table={}".format(archive_group,archive_id,imported_table))
     finally:
@@ -278,6 +299,51 @@ def _restore_data(filename,restore_to_origin_table=False,preserve_id=True):
 
     else:
         return imported_table
+
+def delete_archive_by_month(year,month):
+    d = date(year,month,1)
+    archive_group = get_archive_group(d)
+    blob_resource = get_blob_resource()
+    blob_resource.delete_resource(resource_group=archive_group)
+
+def delete_archive_by_date(d):
+    archive_group = get_archive_group(d)
+    archive_id= get_archive_id(d)
+    vrt_id = "{}.vrt".format(archive_group)
+
+    work_folder = None
+    blob_resource = get_blob_resource()
+    try:
+        del_metadata = blob_resource.delete_resource(resourceid=archive_id,resource_group=archive_group)
+
+        groupmetadata = blob_resource.get_metadata(resource_group=archive_group,throw_exception=True)
+
+        vrt_metadata = next(m for m in groupmetadata.values() if m["resource_id"] == vrt_id)
+
+        vrt_metadata["features"] = 0
+        for m in groupmetadata.values():
+            if m["resource_id"] == vrt_id:
+                continue
+            vrt_metadata["features"] += m["features"]
+
+        layers =  [(m["resource_id"],m["resource_file"]) for m in groupmetadata.values() if m["resource_id"] != vrt_id]
+        if layers:
+            work_folder = tempfile.mkdtemp(prefix="delete_archive")
+            layers.sort(key=lambda o:o[0])
+            layers = os.linesep.join(individual_layer.format(m[0],m[1]) for m in layers )
+            vrt_data = vrt.format(archive_group,layers)
+            vrt_filename = os.path.join(work_folder,"loggedpoint.vrt")
+            with open(vrt_filename,"w") as f:
+                f.write(vrt_data)
+
+            vrt_metadata["file_md5"] = utils.file_md5(vrt_filename)
+            resourcemetadata = blob_resource.push_file(vrt_filename,metadata=vrt_metadata,f_post_push=_set_end_datetime("updated"))
+        else:
+            #all archives in the group were deleted
+            blob_resource.delete_resource(resourceid=vrt_id,resource_group=archive_group)
+    finally:
+        utils.remove_folder(work_folder)
+        pass
 
 
 #archive_by_date(date(2019,11,16),delete_after_archive=False,check=True)

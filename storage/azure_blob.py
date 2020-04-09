@@ -3,6 +3,7 @@ import tempfile
 import logging
 import os
 import shutil
+import traceback
 
 from azure.storage.blob import  BlobServiceClient,BlobClient,BlobType
 from azure.core.exceptions import (ResourceNotFoundError,)
@@ -48,7 +49,7 @@ class AzureBlob(object):
         """
         if blob_data is None:
             #delete the blob resource
-            self._blob_client.delete_blob(delete_snapshots=True)
+            self._blob_client.delete_blob(delete_snapshots="include")
         else:
             if not isinstance(blob_data,bytes):
                 #blob_data is not byte array, convert it to json string
@@ -89,12 +90,12 @@ class AzureBlobResourceMetadata(AzureJsonBlob):
     A client to get/create/update a blob resource's metadata
     metadata is a json object.
     """
-    def __init__(self,connection_string,container_name,resource_base_path=None,cache=False,metadata_filename=None):
-        metadata_filename = metadata_filename or "metadata.json"
+    def __init__(self,connection_string,container_name,resource_base_path=None,cache=False,metaname="metadata"):
+        filename = "{}.json".format(metaname or "metadata") 
         if resource_base_path:
-            metadata_file = "{}/{}".format(resource_base_path,metadata_filename)
+            metadata_file = "{}/{}".format(resource_base_path,filename)
         else:
-            metadata_file = metadata_filename
+            metadata_file = filename
         logger.debug("container={}, metadata file={}".format(container_name,metadata_file))
         super().__init__(metadata_file,connection_string,container_name)
         self._cache = cache
@@ -214,9 +215,10 @@ class AzureBlobResourceBase(object):
     """
     A base client to manage a Azure Resourcet
     """
-    _f_resourceid = staticmethod(lambda resource_name:"{0}_{1}.json".format(resource_name,timezone.now().strftime("%Y-%m-%d-%H-%M-%S")))
-    _f_resourcepath = staticmethod(lambda data_path,resource_group,resourceid:"{0}/{1}/{2}".format(data_path,resource_group,resourceid) if resource_group else "{0}/{1}".format(data_path,resourceid))
-    def __init__(self,resource_name,connection_string,container_name,resource_base_path=None,group_resource=False,archive=True,f_resourceid=None):
+    _f_resourceid = staticmethod(lambda resource_name:resource_name)
+    _f_resource_file = staticmethod(lambda resourceid:"{0}_{1}.json".format(resourceid,timezone.now().strftime("%Y-%m-%d-%H-%M-%S")))
+    _f_resource_path = staticmethod(lambda data_path,resource_group,resource_file:"{0}/{1}/{2}".format(data_path,resource_group,resource_file) if resource_group else "{0}/{1}".format(data_path,resource_file))
+    def __init__(self,resource_name,connection_string,container_name,resource_base_path=None,group_resource=False,archive=True,metaname=None,f_resourceid=None,f_resource_file=None):
         self._resource_name = resource_name
         self._resource_base_path = resource_name if resource_base_path is None else resource_base_path
         if self._resource_base_path:
@@ -225,11 +227,13 @@ class AzureBlobResourceBase(object):
             self._resource_data_path = "data"
         self._connection_string = connection_string
         self._container_name = container_name
-        self._metadata_client = AzureBlobResourceMetadata(connection_string,container_name,resource_base_path=self._resource_base_path,cache=True)
+        self._metadata_client = AzureBlobResourceMetadata(connection_string,container_name,resource_base_path=self._resource_base_path,metaname=metaname,cache=True)
         self._archive = archive
         self.group_resource = group_resource
         if not f_resourceid:
             self._f_resourceid = staticmethod(f_resourceid)
+        if not f_resource_file:
+            self._f_resource_file = staticmethod(f_resource_file)
 
     def get_blob_client(self,blob_name):
         return BlobClient.from_connection_string(self._connection_string,self._container_name,blob_name,**settings.AZURE_BLOG_CLIENT_KWARGS)
@@ -245,6 +249,126 @@ class AzureBlobResourceBase(object):
         Return None if resource metadata is not found
         """
         return self._metadata_client.json
+
+    def get_metadata(self,resourceid=None,resource_group=None,resource_file="current",throw_exception=False):
+        """
+        if resource_file is 'current', it means the latest archive of the specific resource
+        Return 
+            if resourceid is none and (resource_group is none or resource is not a group resource), return all resource metadata
+            if resourceid is none and resource_group is not none annd resource is a group resource, return group metadata
+            if resource_file is not none, and resource is archive resource, return the specific resource archivement's metadata, if exists, otherwise return None or throw exception
+            if archived is none or resource is non archive resource, return the specific resource's metadata, if exists, otherwise return None or throw exception
+
+        """
+        if not resourceid and (not resource_group or not self.group_resource):
+            return self.resourcemetadata
+
+        resourcemetadata = self.resourcemetadata or {}
+        if self.group_resource:
+            if resource_group:
+                groupmetadata = resourcemetadata.get(resource_group)
+                if not groupmetadata:
+                    if throw_exception:
+                        raise ResourceNotFoundError("The resource group({}.{}) Not Found".format(self.resourcename,resource_group))
+                    else:
+                        return None
+                if not resourceid:
+                    return groupmetadata
+                elif resourceid in groupmetadata:
+                    metadata =  groupmetadata[resourceid]
+                elif throw_exception:
+                    raise ResourceNotFoundError("The resource({}.{}.{}) Not Found".format(self.resourcename,resource_group,resourceid))
+                else:
+                    return None
+            else:
+                raise Exception("Must provide resource group to get specific resource's metadata from group resource({}) ".format(self.resourcename))
+        else:
+            if resourceid in self.resourcemetadata:
+                metadata =  self.resourcemetadata[resourceid]
+            elif throw_exception:
+                raise ResourceNotFoundError("The resource({}.{}.{}) Not Found".format(self.resourcename,resource_group,resourceid))
+            else:
+                return None
+    
+        if self._archive and resource_file:
+            if not metadata.get("current") or metadata["current"].get("resource_file"):
+                if throw_exception:
+                    if resource_group:
+                        raise ResourceNotFoundError("Can't find any archived resource in {}.{}.{}".format(self.resourcename,resource_group,resourceid))
+                    else:
+                        raise ResourceNotFoundError("Can't find any archived resource in {}.{}".format(self.resourcename,resourceid))
+                else:
+                    return None
+            if resource_file == "current" or metadata["current"]["resource_file"] == resource_file:
+                metadata = metadata["current"]
+            else:
+                try:
+                    metadata = next(m for m in metadata.get("histories",[]) if m["resource_file"] == resource_file)
+                except StopIteration as es:
+                    if throw_exception:
+                        if resource_group:
+                            raise ResourceNotFoundError("The resource({}.{}.{}.{}) Not Found".format(self.resourcename,resource_group,resourceid,resource_file))
+                        else:
+                            raise ResourceNotFoundError("The resource({}.{}.{}) Not Found".format(self.resourcename,resourceid,resource_file))
+                    else:
+                        return None
+
+        return metadata
+
+    def delete_resource(self,resourceid=None,resource_group=None):
+        """
+        delete the resource_group or specified resource 
+        return the metadata of deleted resources
+        """
+        if self.group_resource:
+            if not resourceid and not resource_group:
+                raise Exception("Please specify the resource id or the resource_group to delete")
+        elif not resourceid:
+            raise Exception("Please specify the resource id of the resource you want to delete")
+
+        metadata = self.get_metadata(resourceid=resourceid,resource_group=resource_group,throw_exception=False)
+        if not metadata:
+            #resource doesn't exist
+            if resource_group:
+                logger.debug("Resource({}.{}) does not exist".format(resource_group,resourceid))
+            else:
+                logger.debug("Resource() does not exist".format(resourceid))
+            return None
+
+        if resourceid:
+            self._delete_resource(metadata)
+        else:
+            metadata = dict(metadata)
+            for m in metadata.values():
+                self._delete_resource(m)
+
+        return metadata
+
+    def _delete_resource(self,metadata):
+        """
+        The metadata of the specific resource you want to delete
+        """
+        if metadata["resource_group"]:
+            logger.debug("Delete the resource({}.{}.{})".format(self.resourcename,metadata["resource_group"],metadata["resource_id"]))
+        else:
+            logger.debug("Delete the resource({}.{})".format(self.resourcename,metadata["resource_id"]))
+        #delete the resource file from storage
+        blob_client = self.get_blob_client(metadata["resource_path"])
+        try:
+            blob_client.delete_blob()
+        except:
+            logger.error("Failed to delete the resource({}) from blob storage.{}".format(metadata["resource_path"],traceback.format_exc()))
+            
+
+        #delete the deleted resource's metadata from resource metadata file
+        resourcemetadata = self.resourcemetadata
+        if self.group_resource:
+            del resourcemetadata[metadata["resource_group"]][metadata["resource_id"]]
+        else:
+            del resourcemetadata[metadata["resource_id"]]
+        #push the latest metadata to storage
+        self._metadata_client.update(resourcemetadata)
+        
 
     def download_group(self,resource_group,folder=None,overwrite=False):
         """
@@ -270,26 +394,19 @@ class AzureBlobResourceBase(object):
         else:
             folder = tempfile.mkdtemp(prefix=resource_group)
 
-        resourcemetadata = self.resourcemetadata
-        if not resourcemetadata:
-            raise ResourceNotFoundError("{} Not Found".format(self.resourcename))
-
-        if not resourcemetadata.get(resource_group):
-            raise ResourceNotFoundError("The resource group({}.{}) Not Found".format(self.resourcename,resource_group))
-
-        groupmetadata = resourcemetadata[resource_group]
-        for metadata in groupmetadata:
+        groupmetadata = self.get_metadata(resource_group=resource_group,throw_exception=True)
+        for metadata in groupmetadata.values():
             if self._archive:
                 metadata = metadata.get("current")
             if not metadata:
                 continue
-            if metadata.get("resource_id") and metadata.get("resource_path"):
-                with open(os.path.join(folder,metadata["resource_id"]),'wb') as f:
+            if metadata.get("resource_file") and metadata.get("resource_path"):
+                with open(os.path.join(folder,metadata["resource_file"]),'wb') as f:
                     self.get_blob_client(metadata["resource_path"]).download_blob().readinto(f)
 
         return (groupmetadata,folder)
 
-    def download(self,resourceid=None,filename=None,overwrite=False,resource_group=None):
+    def download(self,resourceid,filename=None,overwrite=False,resource_group=None,resource_file="current"):
         """
         Download the resource with resourceid, and return the filename 
         remove the existing file or folder if overwrite is True
@@ -303,32 +420,8 @@ class AzureBlobResourceBase(object):
                     #already exist and can't overwrite
                     raise Exception("The path({}) already exists".format(filename))
         
-        resourcemetadata = self.resourcemetadata
-        if not resourcemetadata:
-            raise ResourceNotFoundError("{} Not Found".format(self.resourcename))
-        if self.group_resource:
-            if resource_group:
-                groupmetadata = resourcemetadata.get(resource_group)
-                if not groupmetadata:
-                    raise ResourceNotFoundError("The resource group({}.{}) Not Found".format(self.resourcename,resource_group))
-                if resourceid:
-                    try:
-                        resourcemetadata = next(m for m in groupmetadata if m["resource_id"] == resourceid)
-                    except:
-                        raise ResourceNotFoundError("The resource({}.{}.{}) Not Found".format(self.resourcename,resource_group,resourceid))
-                else:
-                    resourcemetadata = groupmetadata[0]
-            else:
-                raise Exception("Must provide resource group to get latest resource from group resource({}) ".format(self.resourcename))
+        metadata = self.get_metadata(resourceid=resourceid,resource_group=resource_group,throw_exception=True,resource_file=resource_file)
     
-        if self._archive:
-            if not resourcemetadata.get("current") or resourcemetadata["current"].get("resource_path"):
-                raise ResourceNotFoundError("Can't find any resource in {}".format(self.resourcename))
-            metadata = resourcemetadata["current"]
-        else:
-            metadata = resourcemetadata
-
-
         if not filename:
             with tempfile.NamedTemporaryFile(prefix=resourceid) as f:
                 filename = f.name
@@ -345,12 +438,12 @@ class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
     the resource can be a single AzureBlobResource or a group of AzureBlobResource
     if incremental is Ture, this azure resource is uploaded incrementally
     Each AzureResource has a corresponding metadata, the metadata has different structure
-    for increnental resource:
-        resouce metadata has two status: current status and history status.
-    for non increnental resource:
-        resouce metadata has a status list
+    for archive resource:
+        each resource_id keeps the latest resource and history resources. resource_id has a list of resource_file
+    for non archive resource:
+        each resource only keep the latest resource. 
     for grouped resource.
-        group resource metadata is a dict between group name and a list of resource metata
+        group resource metadata is a dict between group name and a list of individual resource metata
 
     """
 
@@ -367,15 +460,17 @@ class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
         if self.group_resource and not metadata.get("resource_group"):
             raise Exception("Missing resource group in metadata")
 
-        resource_group = metadata["resource_group"]
-        resourceid = metadata.get("resource_id") or self._f_resourceid(self._resource_data_path,self._resource_name,resource_group)
-        resourcepath = self._f_resourcepath(self._resource_data_path,resource_group,resourceid)
+        resource_group = metadata.get("resource_group")
+        resourceid = metadata.get("resource_id") or self._f_resourceid(self._resource_name)
+        resource_file = metadata.get("resource_file") or self._f_resource_file(resourceid)
+        resource_path = self._f_resource_path(self._resource_data_path,resource_group,resource_file)
         if not resourceid:
             raise Exception("Missing resource_id in metadata")
 
         metadata["publish_date"] = timezone.now()
         metadata["resource_id"] = resourceid
-        metadata["resource_path"] = resourcepath
+        metadata["resource_file"] = resource_file
+        metadata["resource_path"] = resource_path
 
         resourcemetadata = self.resourcemetadata
         resource_existed = False
@@ -387,27 +482,24 @@ class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
             if resource_group in resourcemetadata:
                 groupmetadata = resourcemetadata[resource_group]
             else:
-                groupmetadata = []
+                groupmetadata = {}
                 resourcemetadata[resource_group] = groupmetadata
-            #check whether the existing resource exist or not
-            index = len(groupmetadata) - 1
-            while index >= 0:
-                if groupmetadata[index]["resource_id"] == metadata["resource_id"]:
-                    break
-                else:
-                    index -= 1
-            if index >= 0:
-                #resource already exists
-                currentmetadata = groupmetadata[index]
-                resource_existed = True
-            else:
-                currentmetadata = {}
-                groupmetadata.append(currentmetadata)
+            
         else:
             if not resourcemetadata:
                 resourcemetadata = {}
+            
+            groupmetadata = resourcemetadata
 
-            currentmetadata = resourcemetadata
+        #check whether the existing resource exist or not
+        if resourceid in groupmetadata:
+            #resource already exists
+            currentmetadata = groupmetadata[resourceid]
+            resource_existed = True
+        else:
+            currentmetadata = {}
+            groupmetadata[resourceid] = currentmetadata
+
 
         if self._archive:
             if "histories" not in currentmetadata:
@@ -416,7 +508,7 @@ class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
                 currentmetadata["histories"].insert(0,currentmetadata["current"])
 
         #push the resource to azure storage
-        blob_client = self.get_blob_client(resourcepath)
+        blob_client = self.get_blob_client(resource_path)
         blob_client.upload_blob(data,blob_type=BlobType.BlockBlob,overwrite=True,timeout=3600,max_concurrency=5,length=length)
         #update the resource metadata
         if f_post_push:
@@ -430,5 +522,4 @@ class AzureBlobResource(AzureBlobResourceBase,ResourceStorage):
         self._metadata_client.update(resourcemetadata)
 
         return resourcemetadata
-
         
