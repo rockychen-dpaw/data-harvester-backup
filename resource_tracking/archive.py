@@ -15,35 +15,47 @@ from . import settings
 
 logger = logging.getLogger(__name__)
 
+#the sql to find the earliest achiving date
 earliest_archive_date = "SELECT min(seen) FROM tracking_loggedpoint"
+#the sql to recreate the missing device from loggedpoint archive
 missing_device_sql = "INSERT INTO tracking_device (deviceid) SELECT distinct a.deviceid FROM {0} a WHERE NOT EXISTS(SELECT 1 FROM tracking_device b WHERE a.deviceid = b.deviceid)"
+#restore the loggedpoint from archive file to tracking_loggedpoint table with orignal id
 restore_with_id_sql = """INSERT INTO tracking_loggedpoint (id,device_id,point,heading,velocity,altitude,seen,message,source_device_type,raw)
     SELECT a.id,b.id,a.point,a.heading,a.velocity,a.altitude,to_timestamp(a.seen),a.message,a.source_device_type,a.raw
     FROM {0} a JOIN tracking_device b on a.deviceid = b.deviceid"""
 
+#restore the loggedpoint from archive file to tracking_loggedpoint table with new id
 restore_sql = """INSERT INTO tracking_loggedpoint (device_id,point,heading,velocity,altitude,seen,message,source_device_type,raw)
     SELECT b.id,a.point,a.heading,a.velocity,a.altitude,a.seen,a.message,a.source_device_type,a.raw
     FROM {0} a JOIN tracking_device b on a.deviceid = b.deviceid"""
 
+#The sql to return the loggedpoint data to archive
 archive_sql = "SELECT a.id,a.point,a.heading,a.velocity,a.altitude,a.message,a.source_device_type,a.raw,extract(epoch from a.seen)::bigint as seen,b.deviceid,b.registration FROM tracking_loggedpoint a JOIN tracking_device b ON a.device_id = b.id WHERE a.seen >= '{0}' AND a.seen < '{1}'"
+#the sql to delete the archived loggedpoint from table tracking_loggedpoint
 del_sql = "DELETE FROM tracking_loggedpoint WHERE seen >= '{0}' AND seen < '{1}'"
+#the datetime pattern used in the sql
 datetime_pattern = "%Y-%m-%d %H:%M:%S %Z"
+#the vrt pattern to generate a union layer for monthly archive 
 vrt = """<OGRVRTDataSource>
     <OGRVRTUnionLayer name="{}">
     {}
     </OGRVRTUnionLayer>
 </OGRVRTDataSource>"""
-
+#the pattern to populate a individual layer used in the union layer vrt file
 individual_layer = """        <OGRVRTLayer name="{}">
             <SrcDataSource>{}</SrcDataSource>
         </OGRVRTLayer>"""
 
+#function to get the archive group name from archive date
 get_archive_group = lambda d:d.strftime("loggedpoint%Y-%m")
+#function to get the archive id from date from archive date
 get_archive_id= lambda d:d.strftime("loggedpoint%Y-%m-%d")
-
 
 _blob_resource = None
 def get_blob_resource():
+    """
+    Return the blob resource client
+    """
     global _blob_resource
     if _blob_resource is None:
         _blob_resource = AzureBlobResource(
@@ -56,6 +68,13 @@ def get_blob_resource():
     return _blob_resource
 
 def continuous_archive(delete_after_archive=False,check=False,max_archive_days=None,overwrite=False):
+    """
+    Continuous archiving the loggedpoint.
+    delete_after_archive: delete the archived data from table tracking_loggedpoint
+    check: check whether archiving is succeed or not
+    max_archive_days: the maxmium days to arhive
+    overwrite: if true, overwrite the existing archived file;if false, throw exception if already archived 
+    """
     db = settings.DATABASE
     earliest_date = db.get(earliest_archive_date)[0].date()
     now = timezone.now()
@@ -86,9 +105,16 @@ def continuous_archive(delete_after_archive=False,check=False,max_archive_days=N
         archived_days += 1
 
 def archive_by_month(year,month,delete_after_archive=False,check=False,overwrite=False):
+    """
+    Archive the logged point for the month.
+    delete_after_archive: delete the archived data from table tracking_loggedpoint
+    check: check whether archiving is succeed or not
+    overwrite: if true, overwrite the existing archived file;if false, throw exception if already archived 
+    """
     now = timezone.now()
     today = now.date()
     archive_date = date(year,month,1)
+    #find the first day of next month
     last_archive_date = date(archive_date.year if archive_date.month < 12 else (archive_date.year + 1), (archive_date.month + 1) if archive_date.month < 12 else 1,1)
     if last_archive_date >= today:
         last_archive_date = today
@@ -106,6 +132,9 @@ def archive_by_month(year,month,delete_after_archive=False,check=False,overwrite
 def archive_by_date(d,delete_after_archive=False,check=False,overwrite=False):
     """
     Archive the logged point within the specified date
+    delete_after_archive: delete the archived data from table tracking_loggedpoint
+    check: check whether archiving is succeed or not
+    overwrite: if true, overwrite the existing archived file;if false, throw exception if already archived 
     """
     now = timezone.now()
     today = now.date()
@@ -128,6 +157,8 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
     Archive the resouce tracking history by start_date(inclusive), end_date(exclusive)
     archive_id: a unique identity of the archive file. that means different start_date and end_date should have a different archive_id
     overwrite: False: raise exception if archive_id already exists; True: overwrite the existing archive file
+    delete_after_archive: delete the archived data from table tracking_loggedpoint
+    check: check whether archiving is succeed or not
     """
     db = settings.DATABASE
     archive_filename = "{}.gpkg".format(archive_id)
@@ -155,6 +186,7 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
             if blob_resource.is_exist(archive_id,resource_group=archive_group):
                 raise ResourceAlreadyExist("The loggedpoint has already been archived. archive_id={0},start_archive_date={1},end_archive_date={2}".format(archive_id,start_date,end_date))
 
+        #export the archived data as geopackage
         sql = archive_sql.format(start_date.strftime(datetime_pattern),end_date.strftime(datetime_pattern))
         export_result = db.export_spatial_data(sql,filename=os.path.join(work_folder,"loggedpoint.gpkg"),layer=archive_id)
         if not export_result:
@@ -240,6 +272,11 @@ def archive(archive_group,archive_id,start_date,end_date,delete_after_archive=Fa
         pass
             
 def restore_by_month(year,month,restore_to_origin_table=False,preserve_id=True):
+    """
+    Restore the loggedpoint from archived files for the month
+    restore_to_origin_table: if true, restore the data to table tracking_loggedpoint; otherwise restore the data into a table with layer name
+    preserve_id: meaningful if restore_to_origin_table is True.
+    """
     d = date(year,month,1)
     archive_group = get_archive_group(d)
     logger.debug("Begin to import archived loggedpoint, archive_group={}".format(archive_group))
@@ -255,6 +292,11 @@ def restore_by_month(year,month,restore_to_origin_table=False,preserve_id=True):
 
 
 def restore_by_date(d,restore_to_origin_table=False,preserve_id=True):
+    """
+    Restore the loggedpoint from archived files for the day
+    restore_to_origin_table: if true, restore the data to table tracking_loggedpoint; otherwise restore the data into a table with layer name
+    preserve_id: meaningful if restore_to_origin_table is True.
+    """
     archive_group = get_archive_group(d)
     archive_id= get_archive_id(d)
     archive_filename = "{}.gpkg".format(archive_id)
@@ -270,6 +312,11 @@ def restore_by_date(d,restore_to_origin_table=False,preserve_id=True):
         pass
 
 def _restore_data(filename,restore_to_origin_table=False,preserve_id=True):
+    """
+    Restore the loggedpoint from the archived files
+    restore_to_origin_table: if true, restore the data to table tracking_loggedpoint; otherwise restore the data into a table with layer name
+    preserve_id: meaningful if restore_to_origin_table is True.
+    """
     db = settings.DATABASE
     imported_table = db.import_spatial_data(filename)
 
@@ -321,6 +368,10 @@ def user_confirm(message,possible_answers,case_sensitive=False):
     return answer
 
 def delete_all():
+    """
+    Delete all archived files from storage,
+    must be used with caution
+    """
     if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
         raise Exception("The feature to delete logged point arhive is disabled.")
     answer = user_confirm("Are you sure you want to delete all loggedpoint archives?(Y/N):",("Y","N"))
@@ -331,9 +382,13 @@ def delete_all():
     blob_resource.delete_resource()
 
 def delete_archive_by_month(year,month):
+    """
+    Delete the archived files for month from storage,
+    must be used with caution
+    """
     if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
         raise Exception("The feature to delete logged point arhive is disabled.")
-    answer = user_confirm("Are you sure you want to delete the loggedpoint archives in month({}/{})?(Y/N):".format(year,month),("Y","N"))
+    answer = user_confirm("Are you sure you want to delete the loggedpoint archives for the month({}/{})?(Y/N):".format(year,month),("Y","N"))
     if answer != 'Y':
         return
     d = date(year,month,1)
@@ -342,9 +397,13 @@ def delete_archive_by_month(year,month):
     blob_resource.delete_resource(resource_group=archive_group)
 
 def delete_archive_by_date(d):
+    """
+    Delete archived files for the day from storage,
+    must be used with caution
+    """
     if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
         raise Exception("The feature to delete logged point arhive is disabled.")
-    answer = user_confirm("Are you sure you want to delete the loggedpoint archives in day({})?(Y/N):".format(d),("Y","N"))
+    answer = user_confirm("Are you sure you want to delete the loggedpoint archives for the day({})?(Y/N):".format(d),("Y","N"))
     if answer != 'Y':
         return
     archive_group = get_archive_group(d)
@@ -386,6 +445,3 @@ def delete_archive_by_date(d):
         pass
 
 
-#archive_by_date(date(2019,11,16),delete_after_archive=False,check=True)
-#restore_by_date(date(2019,11,16))
-            
