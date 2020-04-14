@@ -64,7 +64,7 @@ class ResourceStorage(object):
 
     def delete_resource(self,resourceid=None,resource_group=None):
         """
-        delete the resource_group or specified resource 
+        delete the resource_group or specified resource , or all resources
         return the meta data of the deleted resource
         """
         raise NotImplementedError("Method 'delete_resource' is not implemented.")

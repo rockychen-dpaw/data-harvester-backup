@@ -19,7 +19,15 @@ class AzureBlob(object):
     A blob client to get/update a blob resource
     """
     def __init__(self,blob_path,connection_string,container_name):
+        self._blob_path = blob_path
         self._blob_client = BlobClient.from_connection_string(connection_string,container_name,blob_path,**settings.AZURE_BLOG_CLIENT_KWARGS)
+
+    def delete(self):
+        try:
+            self._blob_client.delete_blob()
+        except:
+            logger.error("Failed to delete the resource from blob storage.{}".format(self._blob_path,traceback.format_exc()))
+
 
     def download(self,filename=None,overwrite=False):
         """
@@ -125,6 +133,11 @@ class AzureBlobResourceMetadata(AzureJsonBlob):
         if self._cache:
             #cache the result
             self._json = metadata
+
+    def delete(self):
+        super().delete()
+        if self._cache:
+            self._json = {}
 
 class AzureBlobResourceClient(AzureBlobResourceMetadata):
     """
@@ -315,11 +328,33 @@ class AzureBlobResourceBase(object):
 
         return metadata
 
+
     def delete_resource(self,resourceid=None,resource_group=None):
         """
         delete the resource_group or specified resource 
         return the metadata of deleted resources
         """
+        if not resourceid and not resource_group:
+            #delete all resources
+            if self.group_resource:
+                #group resource, delete each group
+                for gmetadata in [m for m in self.resourcemetadata.values()]:
+                    #delete each group resource
+                    for rmetadata in [m for m in gmetadata.values()]:
+                        #delete each resource in group resource
+                        self._delete_resource(rmetadata)
+            else:
+                #non group resource
+                for rmetadata in [m for m in self.resourcemetadata.values()]:
+                    #delete each resource in resource
+                    self._delete_resource(rmetadata)
+
+            #delete the resource metadata
+            metadata = self.resourcemetadata
+            self._metadata_client.delete()
+            return metadata
+
+
         if self.group_resource:
             if not resourceid and not resource_group:
                 raise Exception("Please specify the resource id or the resource_group to delete")
@@ -347,17 +382,36 @@ class AzureBlobResourceBase(object):
     def _delete_resource(self,metadata):
         """
         The metadata of the specific resource you want to delete
+        Delete the current archive and all histories archives for archive resource. 
         """
         if metadata["resource_group"]:
             logger.debug("Delete the resource({}.{}.{})".format(self.resourcename,metadata["resource_group"],metadata["resource_id"]))
         else:
             logger.debug("Delete the resource({}.{})".format(self.resourcename,metadata["resource_id"]))
         #delete the resource file from storage
-        blob_client = self.get_blob_client(metadata["resource_path"])
-        try:
-            blob_client.delete_blob()
-        except:
-            logger.error("Failed to delete the resource({}) from blob storage.{}".format(metadata["resource_path"],traceback.format_exc()))
+        if self._archive:
+            #archive resource
+            #delete the current archive
+            blob_client = self.get_blob_client(metadata["current"]["resource_path"])
+            try:
+                blob_client.delete_blob()
+            except:
+                logger.error("Failed to delete the current resource({}) from blob storage.{}".format(metadata["current"]["resource_path"],traceback.format_exc()))
+            #delete all history arvhives
+            for m in metadata.get("histroies") or []:
+                blob_client = self.get_blob_client(m["resource_path"])
+                try:
+                    blob_client.delete_blob()
+                except:
+                    logger.error("Failed to delete the history resource({}) from blob storage.{}".format(m["resource_path"],traceback.format_exc()))
+
+            
+        else:
+            blob_client = self.get_blob_client(metadata["resource_path"])
+            try:
+                blob_client.delete_blob()
+            except:
+                logger.error("Failed to delete the resource({}) from blob storage.{}".format(metadata["resource_path"],traceback.format_exc()))
             
 
         #delete the deleted resource's metadata from resource metadata file

@@ -13,7 +13,7 @@ parser.add_argument('--overwrite', action='store_true',help='Overwrite the exist
 def run():
     args = parser.parse_args(sys.argv[2:])
     #restore by date
-    archive.continuous_archive(delete_after_archive=args.delete,check=args.check,max_archive_days=args.max_archive_days if args.max_archive_days > 0 else None,overwrite=args.overwrite)
+    archive.continuous_archive(delete_after_archive=args.delete,check=args.check,max_archive_days=args.max_archive_days if args.max_archive_days and args.max_archive_days > 0 else None,overwrite=args.overwrite)
 
 
 

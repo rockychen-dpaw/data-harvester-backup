@@ -47,7 +47,7 @@ def get_blob_resource():
     global _blob_resource
     if _blob_resource is None:
         _blob_resource = AzureBlobResource(
-            "loggedpoint",
+            settings.LOGGEDPOINT_RESOURCE_NAME,
             settings.AZURE_CONNECTION_STRING,
             settings.AZURE_CONTAINER,
             group_resource=True,
@@ -75,7 +75,11 @@ def continuous_archive(delete_after_archive=False,check=False,max_archive_days=N
     last_archive_date = today - timedelta(days=settings.LOGGEDPOINT_ACTIVE_DAYS)
     archive_date = earliest_date
     archived_days = 0
-    max_archive_days = max_archive_days if max_archive_days > 0 else None
+    max_archive_days = max_archive_days if max_archive_days and  max_archive_days > 0 else None
+
+    logger.info("Begin to continuous archiving loggedpoint, earliest archive date={0},last archive date = {1}, delete_after_archive={2}, check={3}, max_archive_days={4}".format(
+        earliest_date,last_archive_date,delete_after_archive,check,max_archive_days
+    ))
     while archive_date < last_archive_date and (not max_archive_days or archived_days < max_archive_days):
         archive_by_date(archive_date,delete_after_archive=delete_after_archive,check=check,overwrite=overwrite)
         archive_date += timedelta(days=1)
@@ -300,13 +304,49 @@ def _restore_data(filename,restore_to_origin_table=False,preserve_id=True):
     else:
         return imported_table
 
+def user_confirm(message,possible_answers,case_sensitive=False):
+    """
+    Ask the user's confirmation
+    if case_sensitvie is False, turn the answer to upper case
+    """
+    answer = None
+    while answer is None:
+        answer = input(message)
+        if not case_sensitive:
+            answer = answer.upper()
+
+        if answer not in possible_answers:
+            answer = None
+
+    return answer
+
+def delete_all():
+    if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
+        raise Exception("The feature to delete logged point arhive is disabled.")
+    answer = user_confirm("Are you sure you want to delete all loggedpoint archives?(Y/N):",("Y","N"))
+    if answer != 'Y':
+        return
+
+    blob_resource = get_blob_resource()
+    blob_resource.delete_resource()
+
 def delete_archive_by_month(year,month):
+    if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
+        raise Exception("The feature to delete logged point arhive is disabled.")
+    answer = user_confirm("Are you sure you want to delete the loggedpoint archives in month({}/{})?(Y/N):".format(year,month),("Y","N"))
+    if answer != 'Y':
+        return
     d = date(year,month,1)
     archive_group = get_archive_group(d)
     blob_resource = get_blob_resource()
     blob_resource.delete_resource(resource_group=archive_group)
 
 def delete_archive_by_date(d):
+    if settings.LOGGEDPOINT_ARCHIVE_DELETE_DISABLED:
+        raise Exception("The feature to delete logged point arhive is disabled.")
+    answer = user_confirm("Are you sure you want to delete the loggedpoint archives in day({})?(Y/N):".format(d),("Y","N"))
+    if answer != 'Y':
+        return
     archive_group = get_archive_group(d)
     archive_id= get_archive_id(d)
     vrt_id = "{}.vrt".format(archive_group)
